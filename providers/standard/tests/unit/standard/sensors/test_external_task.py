@@ -2441,3 +2441,46 @@ class TestExternalDagLink:
 
         base_url = conf.get("api", "base_url", fallback="/").lower()
         assert url == f"{base_url}dags/external_dag/runs/{dr.run_id}"
+
+    @pytest.mark.parametrize("source", ["filter", "delta", "fn"])
+    def test_link_uses_external_run_for_a_different_logical_date(self, source, dag_maker):
+        from airflow.configuration import conf
+
+        current = timezone.datetime(2026, 2, 11, 22, 35)
+        target = current - timedelta(minutes=5)
+        sensor_kwargs: dict = {
+            "task_id": "wait",
+            "external_dag_id": "parent",
+            "external_task_id": "done",
+        }
+        if source == "delta":
+            sensor_kwargs["execution_delta"] = timedelta(minutes=5)
+        elif source == "fn":
+            sensor_kwargs["execution_date_fn"] = lambda logical_date, **_: target
+
+        with dag_maker(f"child_{source}", serialized=True):
+            task = ExternalTaskSensor(**sensor_kwargs)
+        if source == "filter":
+            task.external_dates_filter = target.isoformat()
+
+        seen: dict = {}
+
+        class _RuntimeTI:
+            run_id = "scheduled__child"
+
+            @staticmethod
+            def get_template_context():
+                return {"logical_date": current, "task": task}
+
+            @staticmethod
+            def get_task_states(**kwargs):
+                seen.update(kwargs)
+                return {"scheduled__parent": {"done": "success"}}
+
+        url = task.operator_extra_links[0].get_link(operator=task, ti_key=_RuntimeTI())
+
+        base_url = conf.get("api", "base_url", fallback="/").lower()
+        assert seen["dag_id"] == "parent"
+        assert seen["task_ids"] == ["done"]
+        assert [item.isoformat() for item in seen["logical_dates"]] == [target.isoformat()]
+        assert url == f"{base_url}dags/parent/runs/scheduled__parent"

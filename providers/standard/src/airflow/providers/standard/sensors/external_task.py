@@ -99,11 +99,99 @@ class ExternalDagLink(BaseOperatorLink):
         if AIRFLOW_V_3_0_PLUS:
             from airflow.utils.helpers import build_airflow_dagrun_url
 
-            return build_airflow_dagrun_url(dag_id=external_dag_id, run_id=ti_key.run_id)
+            return build_airflow_dagrun_url(
+                dag_id=external_dag_id, run_id=self._external_run_id(operator, ti_key) or ti_key.run_id
+            )
         from airflow.utils.helpers import build_airflow_url_with_query  # type:ignore[attr-defined]
 
         query = {"dag_id": external_dag_id, "run_id": ti_key.run_id}
         return build_airflow_url_with_query(query)
+
+    def _external_run_id(self, operator: BaseOperator, ti_key: TaskInstanceKey) -> str | None:
+        """
+        Return the external Dag's run id when the sensor waits on another logical date.
+
+        This runs in the task process, which cannot read the metadata database.
+        ``get_task_states`` is the supervisor call the sensor already uses while poking.
+        """
+        if not isinstance(operator, ExternalTaskSensor):
+            return None
+        logical_dates = self._shifted_logical_dates(operator, ti_key)
+        if not logical_dates:
+            return None
+        get_task_states = getattr(ti_key, "get_task_states", None)
+        if not callable(get_task_states):
+            return None
+
+        criteria: dict[str, typing.Any] = {
+            "dag_id": operator.external_dag_id,
+            "logical_dates": logical_dates,
+        }
+        if operator.external_task_ids:
+            criteria["task_ids"] = list(operator.external_task_ids)
+        elif operator.external_task_group_id:
+            criteria["task_group_id"] = operator.external_task_group_id
+        try:
+            states = get_task_states(**criteria)
+        except Exception:
+            return None
+        if not isinstance(states, dict) or not states:
+            return None
+        return next(iter(states))
+
+    def _shifted_logical_dates(
+        self, operator: ExternalTaskSensor, ti_key: TaskInstanceKey
+    ) -> list[datetime.datetime] | None:
+        context = self._context_for_link(operator, ti_key)
+        current = self._logical_date_from_context(operator, context)
+        dates = self._dates_from_filter(operator)
+        if dates is None and context is not None and (operator.execution_delta or operator.execution_date_fn):
+            try:
+                dates = list(operator._get_dttm_filter(context))
+            except Exception:
+                return None
+        if not dates:
+            return None
+        if current is not None and all(date.isoformat() == current.isoformat() for date in dates):
+            return None
+        return dates
+
+    @staticmethod
+    def _dates_from_filter(operator: ExternalTaskSensor) -> list[datetime.datetime] | None:
+        raw = operator.external_dates_filter
+        if not raw:
+            return None
+        try:
+            return [datetime.datetime.fromisoformat(part) for part in raw.split(",") if part]
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _context_for_link(operator: ExternalTaskSensor, ti_key: TaskInstanceKey) -> dict | None:
+        get_template_context = getattr(ti_key, "get_template_context", None)
+        if callable(get_template_context):
+            try:
+                context = get_template_context()
+            except Exception:
+                context = None
+            if isinstance(context, dict):
+                context.setdefault("task", operator)
+                return context
+        logical_date = getattr(ti_key, "logical_date", None)
+        if isinstance(logical_date, datetime.datetime):
+            return {"logical_date": logical_date, "task": operator}
+        return None
+
+    @staticmethod
+    def _logical_date_from_context(
+        operator: ExternalTaskSensor, context: dict | None
+    ) -> datetime.datetime | None:
+        if context is None:
+            return None
+        try:
+            return operator._get_logical_date(context)
+        except (KeyError, TypeError, ValueError):
+            return None
 
 
 class ExternalTaskSensor(BaseSensorOperator):
