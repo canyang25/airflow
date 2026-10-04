@@ -839,7 +839,17 @@ class KubernetesExecutor(BaseExecutor):
                 container_type = failure_details.get("container_type")
                 container_name = failure_details.get("container_name")
 
-                termination_reason = f"Pod failed because of {pod_reason}"
+                # Pod status.reason stays empty for container failures such as OOMKilled.
+                if not pod_reason and container_reason:
+                    details = []
+                    if container_name:
+                        details.append(f"container: {container_name}")
+                    if exit_code is not None:
+                        details.append(f"exit code: {exit_code}")
+                    detail = f" ({', '.join(details)})" if details else ""
+                    termination_reason = f"Pod failed because of {container_reason}{detail}"
+                else:
+                    termination_reason = f"Pod failed because of {pod_reason}"
 
                 task_key_str = str(key)
                 self.log.warning(
