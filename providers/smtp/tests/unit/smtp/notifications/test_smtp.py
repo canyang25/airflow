@@ -227,6 +227,7 @@ class TestSmtpNotifier:
     @pytest.mark.parametrize(
         ("connection_sender", "configured_sender", "expected"),
         [
+            pytest.param("conn@example.com", "config@example.com", "conn@example.com", id="connection"),
             pytest.param(None, "config@example.com", "config@example.com", id="config"),
             pytest.param("  ", "config@example.com", "config@example.com", id="blank-connection"),
             pytest.param(None, None, "airflow@airflow", id="default"),
