@@ -109,6 +109,7 @@ from airflow.models.log import resolve_team_name
 from airflow.models.pool import normalize_pool_name_for_stats
 from airflow.models.serialized_dag import SerializedDagModel
 from airflow.models.taskinstance import TaskInstance
+from airflow.models.taskinstancehistory import TaskInstanceHistory
 from airflow.models.team import Team
 from airflow.models.trigger import TRIGGER_FAIL_REPR, Trigger, TriggerFailureReason, handle_event_submit
 from airflow.observability.metrics import stats_utils
@@ -1746,13 +1747,35 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                 # Update task state - emails are handled by DAG processor now
                 ti.handle_failure(error=msg, session=session)
 
-        for task_id in tis_with_right_state:
-            if task_id in event_buffer:
+        unmatched_task_ids = [task_id for task_id in tis_with_right_state if task_id in event_buffer]
+        archived_ids: set[UUID] = set()
+        if unmatched_task_ids:
+            archived_ids = {
+                UUID(str(archived_id))
+                for archived_id in session.scalars(
+                    select(TaskInstanceHistory.task_instance_id).where(
+                        TaskInstanceHistory.task_instance_id.in_(
+                            [task_id.id for task_id in unmatched_task_ids]
+                        )
+                    )
+                )
+            }
+        for task_id in unmatched_task_ids:
+            coordinates = event_coordinates.get(task_id)
+            if task_id.id in archived_ids:
+                # A retry replaces the task instance id before this event is drained.
+                cls.logger().info(
+                    "Discarding executor event for task instance %s (coordinates=%s): "
+                    "the attempt was already archived",
+                    task_id,
+                    coordinates,
+                )
+            else:
                 cls.logger().warning(
                     "Discarding executor event for task instance %s (coordinates=%s): no matching task instance was "
                     "returned; it may no longer exist or may be locked by another scheduler",
                     task_id,
-                    event_coordinates.get(task_id),
+                    coordinates,
                 )
         cls._emit_executor_events_batch_metrics(num_events)
         return len(event_buffer)

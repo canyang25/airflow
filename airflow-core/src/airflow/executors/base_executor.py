@@ -340,6 +340,9 @@ class BaseExecutor(LoggingMixin):
         self.running: set[WorkloadKey] = set()
         self.event_buffer: dict[WorkloadKey, EventBufferValueType] = {}
         self._task_coordinates: dict[TaskInstanceUuid, TaskInstanceKey] = {}
+        # Ids dispatched without being added to ``running``. Coordinate cleanup
+        # treats anything outside running, the queue, and the event buffer as finished.
+        self._in_flight_task_ids: set[TaskInstanceUuid] = set()
         self._task_event_logs: deque[Log] = deque()
         self.conf = ExecutorConf(team_name)
 
@@ -639,6 +642,8 @@ class BaseExecutor(LoggingMixin):
             except KeyError:
                 self.log.debug("Could not find key: %s", key)
         self.event_buffer[key] = state, info
+        if isinstance(key, TaskInstanceUuid):
+            self._in_flight_task_ids.discard(key)
 
     def fail(self, key: WorkloadKey, info=None) -> None:
         """
@@ -706,7 +711,7 @@ class BaseExecutor(LoggingMixin):
             if not any(
                 key in container
                 for key in (task_id, coordinates)
-                for container in (self.running, task_queue, self.event_buffer)
+                for container in (self.running, task_queue, self.event_buffer, self._in_flight_task_ids)
             ):
                 del self._task_coordinates[task_id]
 

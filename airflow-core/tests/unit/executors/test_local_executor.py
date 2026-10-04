@@ -159,6 +159,38 @@ class TestLocalExecutor:
         finally:
             executor.end()
 
+    def test_dispatched_task_coordinates_survive_until_result_is_drained(self):
+        """A LocalExecutor task stays identifiable until its result is drained.
+
+        Dispatched tasks are not stored in ``running`` (workers share one queue), so a
+        scheduler drain before the result arrives must not drop the attempt coordinates.
+        """
+        executor = LocalExecutor(parallelism=1)
+        workload = _make_task_workload()
+        task_id = TaskInstanceUuid(workload.ti.id)
+        with (
+            mock.patch.object(LocalExecutor, "_spawn_workers_with_gc_freeze"),
+            mock.patch.object(LocalExecutor, "_check_workers"),
+        ):
+            executor.start()
+            try:
+                executor.queue_workload(workload, session=mock.MagicMock(spec=Session))
+                executor.heartbeat()
+
+                events, coordinates = executor._drain_events_with_task_ids()
+
+                assert events == {}
+                assert executor._task_coordinates[task_id] == workload.ti.key
+
+                executor.change_state(task_id, State.SUCCESS)
+                events, coordinates = executor._drain_events_with_task_ids()
+            finally:
+                executor.end()
+
+        assert events[task_id][0] == State.SUCCESS
+        assert coordinates[task_id] == workload.ti.key
+        assert task_id not in executor._task_coordinates
+
     @skip_non_fork_mp_start
     @mock.patch("airflow.executors.base_executor.BaseExecutor.run_workload")
     def test_execution(self, mock_run_workload):

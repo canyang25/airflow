@@ -38,6 +38,7 @@ import structlog
 
 from airflow.executors.base_executor import BaseExecutor, get_execution_api_server_url
 from airflow.executors.workloads import WorkloadType
+from airflow.executors.workloads.types import TaskInstanceUuid
 
 # add logger to parameter of setproctitle to support logging
 if sys.platform == "darwin":
@@ -321,6 +322,9 @@ class LocalExecutor(BaseExecutor):
             removed = self.executor_queues[workload.type].pop(key, None)
             if not removed:
                 raise KeyError(f"Workload {key} was not found in any queue")
+            # Workers share one queue, so this task is not tracked in ``running``.
+            if isinstance(key, TaskInstanceUuid):
+                self._in_flight_task_ids.add(key)
         with self._unread_messages:
             self._unread_messages.value += len(workload_list)
         self._check_workers()

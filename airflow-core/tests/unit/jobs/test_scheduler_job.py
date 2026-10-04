@@ -782,9 +782,17 @@ class TestSchedulerJob:
             for record in caplog.records
         )
         assert any(
-            "Discarding executor event" in record.message
+            record.levelname == "INFO"
+            and "Discarding executor event" in record.message
+            and "already archived" in record.message
             and str(retired_id) in record.message
             and str(retired_coordinates) in record.message
+            for record in caplog.records
+        )
+        assert not any(
+            record.levelname == "WARNING"
+            and "Discarding executor event" in record.message
+            and str(retired_id) in record.message
             for record in caplog.records
         )
         if include_current:
@@ -821,7 +829,7 @@ class TestSchedulerJob:
             for record in caplog.records
         ) == (event_state == State.SUCCESS)
         if event_state == State.SUCCESS:
-            scalars.assert_called_once()
+            assert scalars.call_count == 2
         else:
             scalars.assert_not_called()
 
