@@ -18,7 +18,9 @@
 from __future__ import annotations
 
 import json
+import os
 import random
+import resource
 import string
 import textwrap
 from io import StringIO
@@ -34,6 +36,43 @@ from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.ssh.hooks.ssh import SSHHook
 
 pytestmark = pytest.mark.db_test
+
+
+class _LengthAfterFirstProbe:
+    """Report length 0 on the first probe, then the payload length."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self._probes = 0
+
+    def __len__(self) -> int:
+        self._probes += 1
+        if self._probes == 1:
+            return 0
+        return len(self._payload)
+
+
+def _open_fd_at_or_above(minimum: int) -> int:
+    """Return an open descriptor numbered ``minimum`` or higher."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft <= minimum:
+        if hard != resource.RLIM_INFINITY and hard <= minimum:
+            pytest.skip(f"RLIMIT_NOFILE hard limit {hard} cannot open fd {minimum}")
+        new_soft = minimum + 1 if hard == resource.RLIM_INFINITY else min(hard, minimum + 1)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+
+    source = os.open(os.devnull, os.O_RDONLY)
+    candidate = minimum
+    try:
+        while True:
+            try:
+                os.fstat(candidate)
+            except OSError:
+                os.dup2(source, candidate)
+                return candidate
+            candidate += 1
+    finally:
+        os.close(source)
 
 
 HELLO_SERVER_CMD = """
@@ -953,11 +992,23 @@ class TestSSHHook:
         mock_client = mock.MagicMock(spec=paramiko.SSHClient)
         mock_client.exec_command.return_value = (mock_stdin, mock_stdout, mock_stderr)
 
-        def fake_select(rlist, wlist, xlist, timeout=None):
-            assert timeout == pytest.approx(0.001), f"Expected cmd_timeout passed to select, got {timeout}"
-            return [], [], []
+        class _TimeoutSelector:
+            def register(self, fileobj, events, data=None):
+                return None
 
-        with mock.patch("airflow.providers.ssh.hooks.ssh.select", side_effect=fake_select):
+            def select(self, timeout=None):
+                assert timeout == pytest.approx(0.001), (
+                    f"Expected cmd_timeout passed to the channel selector, got {timeout}"
+                )
+                return []
+
+            def close(self):
+                return None
+
+        with mock.patch(
+            "airflow.providers.ssh.hooks.ssh.selectors.PollSelector",
+            return_value=_TimeoutSelector(),
+        ):
             with pytest.raises(AirflowException, match="SSH command timed out"):
                 hook.exec_ssh_client_command(mock_client, "sleep 1", False, None)
 
@@ -970,6 +1021,51 @@ class TestSSHHook:
         assert mock.call() in mock_channel.close.call_args_list
         assert mock.call() in mock_stdout.close.call_args_list
         assert mock.call() in mock_stderr.close.call_args_list
+
+    def test_exec_ssh_client_command_with_fd_above_select_limit(self):
+        high_fd = _open_fd_at_or_above(1024)
+        try:
+            hook = SSHHook(
+                ssh_conn_id="ssh_default",
+                conn_timeout=30,
+                banner_timeout=100,
+            )
+            stdout_calls = {"ready": 0}
+            stderr_calls = {"ready": 0}
+
+            def _stdout_ready():
+                stdout_calls["ready"] += 1
+                return stdout_calls["ready"] == 1
+
+            def _stderr_ready():
+                stderr_calls["ready"] += 1
+                return stderr_calls["ready"] == 1
+
+            mock_channel = mock.MagicMock(spec=paramiko.Channel)
+            mock_channel.fileno.return_value = high_fd
+            type(mock_channel).closed = mock.PropertyMock(return_value=False)
+            mock_channel.recv_ready.side_effect = _stdout_ready
+            mock_channel.recv_stderr_ready.side_effect = _stderr_ready
+            mock_channel.exit_status_ready.return_value = True
+            mock_channel.recv.return_value = b"out-line\n"
+            mock_channel.recv_stderr.return_value = b"err-line\n"
+            mock_channel.recv_exit_status.return_value = 0
+            mock_channel.in_buffer = _LengthAfterFirstProbe(b"out-line\n")
+            mock_channel.in_stderr_buffer = b"err-line\n"
+
+            mock_stdout = mock.MagicMock(spec=paramiko.ChannelFile)
+            mock_stdout.channel = mock_channel
+            mock_stdin = mock.MagicMock(spec=paramiko.ChannelStdinFile)
+            mock_stderr = mock.MagicMock(spec=paramiko.ChannelStderrFile)
+            mock_stderr.channel = mock_channel
+
+            mock_client = mock.MagicMock(spec=paramiko.SSHClient)
+            mock_client.exec_command.return_value = (mock_stdin, mock_stdout, mock_stderr)
+
+            ret = hook.exec_ssh_client_command(mock_client, "echo airflow", False, None, 5)
+            assert ret == (0, b"out-line\n", b"err-line\n")
+        finally:
+            os.close(high_fd)
 
     def test_command_timeout_not_set(self, monkeypatch):
         hook = SSHHook(
