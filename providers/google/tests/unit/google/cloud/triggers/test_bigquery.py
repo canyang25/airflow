@@ -737,6 +737,49 @@ class TestBigQueryIntervalCheckTrigger:
         asyncio.get_event_loop().stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("first_status", "second_status"),
+        [
+            pytest.param("running", "running", id="both_running"),
+            pytest.param("running", "success", id="first_still_running"),
+            pytest.param("success", "running", id="second_still_running"),
+            pytest.param("error", "running", id="failed_while_other_running"),
+        ],
+    )
+    @mock.patch("airflow.providers.google.cloud.hooks.bigquery.BigQueryAsyncHook.get_job_status")
+    async def test_interval_check_trigger_keeps_polling_until_both_jobs_finish(
+        self, mock_job_status, first_status, second_status, interval_check_trigger
+    ):
+        mock_job_status.side_effect = [
+            {"status": first_status, "message": f"first {first_status}"},
+            {"status": second_status, "message": f"second {second_status}"},
+        ]
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(interval_check_trigger.run().__anext__(), timeout=0.05)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("second_status", "second_message"),
+        [
+            pytest.param("success", "Job completed", id="second_job_succeeded"),
+            pytest.param("error", "second failed", id="both_jobs_failed"),
+        ],
+    )
+    @mock.patch("airflow.providers.google.cloud.hooks.bigquery.BigQueryAsyncHook.get_job_status")
+    async def test_interval_check_trigger_reports_the_job_that_failed(
+        self, mock_job_status, second_status, second_message, interval_check_trigger
+    ):
+        mock_job_status.side_effect = [
+            {"status": "error", "message": "first failed"},
+            {"status": second_status, "message": second_message},
+        ]
+
+        actual = await interval_check_trigger.run().__anext__()
+
+        assert actual == TriggerEvent({"status": "error", "message": "first failed", "data": None})
+
+    @pytest.mark.asyncio
     @mock.patch("airflow.providers.google.cloud.hooks.bigquery.BigQueryAsyncHook.get_job_status")
     async def test_interval_check_trigger_terminated(self, mock_job_status, interval_check_trigger):
         """Tests the BigQueryIntervalCheckTrigger fires the correct event in case of an error."""
@@ -832,6 +875,14 @@ class TestBigQueryValueCheckTrigger:
 
         # Prevents error when task is destroyed while in "pending" state
         asyncio.get_event_loop().stop()
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.hooks.bigquery.BigQueryAsyncHook.get_job_status")
+    async def test_value_check_op_trigger_running_keeps_polling(self, mock_job_status, value_check_trigger):
+        mock_job_status.return_value = {"status": "running", "message": "Job running"}
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(value_check_trigger.run().__anext__(), timeout=0.05)
 
     @pytest.mark.asyncio
     @mock.patch("airflow.providers.google.cloud.hooks.bigquery.BigQueryAsyncHook.get_job_status")

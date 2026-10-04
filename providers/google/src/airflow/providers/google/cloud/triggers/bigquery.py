@@ -509,10 +509,9 @@ class BigQueryIntervalCheckTrigger(BigQueryInsertJobTrigger):
                     location=self.location,
                 )
 
-                if (
-                    first_job_response_from_hook["status"] == "success"
-                    and second_job_response_from_hook["status"] == "success"
-                ):
+                first_status = first_job_response_from_hook["status"]
+                second_status = second_job_response_from_hook["status"]
+                if first_status == "success" and second_status == "success":
                     sync_hook = await hook.get_sync_hook()
 
                     if sync_hook.is_default_universe():
@@ -581,18 +580,16 @@ class BigQueryIntervalCheckTrigger(BigQueryInsertJobTrigger):
                         }
                     )
                     return
-                elif (
-                    first_job_response_from_hook["status"] == "pending"
-                    or second_job_response_from_hook["status"] == "pending"
-                ):
+                if first_status not in {"success", "error"} or second_status not in {"success", "error"}:
                     self.log.info("Query is still running...")
                     self.log.info("Sleeping for %s seconds.", self.poll_interval)
                     await asyncio.sleep(self.poll_interval)
-                else:
-                    yield TriggerEvent(
-                        {"status": "error", "message": second_job_response_from_hook["message"], "data": None}
-                    )
-                    return
+                    continue
+                failed_job = (
+                    first_job_response_from_hook if first_status == "error" else second_job_response_from_hook
+                )
+                yield TriggerEvent({"status": "error", "message": failed_job["message"], "data": None})
+                return
 
         except Exception as e:
             self.log.exception("Exception occurred while checking for query completion")
@@ -677,22 +674,23 @@ class BigQueryValueCheckTrigger(BigQueryInsertJobTrigger):
             while True:
                 # Poll for job execution status
                 response_from_hook = await hook.get_job_status(job_id=self.job_id, project_id=self.project_id)
-                if response_from_hook["status"] == "success":
+                job_status = response_from_hook["status"]
+                if job_status == "success":
                     query_results = await hook.get_job_output(job_id=self.job_id, project_id=self.project_id)
                     records = hook.get_records(query_results)
                     _records = records.pop(0) if records else None
                     hook.value_check(self.sql, self.pass_value, _records, self.tolerance)
                     yield TriggerEvent({"status": "success", "message": "Job completed", "records": _records})
                     return
-                elif response_from_hook["status"] == "pending":
+                if job_status != "error":
                     self.log.info("Query is still running...")
                     self.log.info("Sleeping for %s seconds.", self.poll_interval)
                     await asyncio.sleep(self.poll_interval)
-                else:
-                    yield TriggerEvent(
-                        {"status": "error", "message": response_from_hook["message"], "records": None}
-                    )
-                    return
+                    continue
+                yield TriggerEvent(
+                    {"status": "error", "message": response_from_hook["message"], "records": None}
+                )
+                return
         except Exception as e:
             self.log.exception("Exception occurred while checking for query completion")
             yield TriggerEvent({"status": "error", "message": str(e)})
