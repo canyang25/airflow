@@ -119,6 +119,24 @@ def test_getitem_index(mock_supervisor_comms, lazy_sequence):
     )
 
 
+def test_getitem_index_like(mock_supervisor_comms, lazy_sequence):
+    class IndexLike:
+        def __index__(self):
+            return 4
+
+    mock_supervisor_comms.send.return_value = XComSequenceIndexResult(root="f")
+    assert lazy_sequence[IndexLike()] == "f"
+    mock_supervisor_comms.send.assert_called_once_with(
+        GetXComSequenceItem(
+            key=BaseXCom.XCOM_RETURN_KEY,
+            dag_id="dag",
+            task_id="task",
+            run_id="run",
+            offset=4,
+        ),
+    )
+
+
 @conf_vars({("core", "xcom_backend"): "task_sdk.execution_time.test_lazy_sequence.CustomXCom"})
 def test_getitem_calls_correct_deserialise(monkeypatch, mock_supervisor_comms, lazy_sequence):
     mock_supervisor_comms.send.return_value = XComSequenceIndexResult(root="some-value")
