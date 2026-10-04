@@ -2082,6 +2082,7 @@ def _send_error_email_notification(
 
     email_backend = conf.get("email", "email_backend", fallback=_DEFAULT_EMAIL_BACKEND)
     notifier_description = "SmtpNotifier"
+    resolve_sender_from_connection = False
 
     if email_backend and email_backend != _DEFAULT_EMAIL_BACKEND:
         notifier_class: _ErrorEmailNotifier = _LegacyEmailBackendNotifier
@@ -2097,6 +2098,7 @@ def _send_error_email_notification(
             )
             return
         notifier_class = SmtpNotifier
+        resolve_sender_from_connection = True
 
     subject_template_file = conf.get("email", "subject_template", fallback=None)
 
@@ -2140,11 +2142,15 @@ def _send_error_email_notification(
         return
 
     try:
+        # SmtpNotifier applies connection extra, then [email] from_email. Passing the
+        # config value here would skip the connection extra on every task error email.
         notifier = notifier_class(
             to=to_emails,
             subject=subject,
             html_content=html_content,
-            from_email=conf.get("email", "from_email", fallback="airflow@airflow"),
+            from_email=None
+            if resolve_sender_from_connection
+            else conf.get("email", "from_email", fallback="airflow@airflow"),
         )
         notifier(email_context)
     except Exception:

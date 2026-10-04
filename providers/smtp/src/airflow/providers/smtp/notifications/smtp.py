@@ -35,7 +35,9 @@ class SmtpNotifier(BaseNotifier):
     """
     SMTP Notifier.
 
-    Accepts keyword arguments. The only required arguments are `from_email` and `to`. Examples:
+    Accepts keyword arguments. The only required argument is `to`. When `from_email` is omitted, the
+    sender is the SMTP connection extra `from_email` if that is set, otherwise `[email] from_email`,
+    otherwise `airflow@airflow`. Examples:
 
     .. code-block:: python
 
@@ -122,10 +124,7 @@ class SmtpNotifier(BaseNotifier):
     def _build_email_content(self, smtp: SmtpHook, context: Context):
         fields_to_re_render = []
         if self.from_email is None:
-            if smtp.from_email is not None:
-                self.from_email = smtp.from_email
-            else:
-                raise ValueError("You should provide `from_email` or define it in the connection")
+            self.from_email = _resolve_omitted_from_email(smtp)
             fields_to_re_render.append("from_email")
         if self.subject is None:
             smtp_default_templated_subject_path: str
@@ -186,6 +185,16 @@ class SmtpNotifier(BaseNotifier):
                 mime_charset=self.mime_charset,
                 custom_headers=self.custom_headers,
             )
+
+
+def _resolve_omitted_from_email(smtp: SmtpHook) -> str:
+    connection_sender = smtp.from_email
+    if isinstance(connection_sender, str) and connection_sender.strip():
+        return connection_sender
+    configured_sender = conf.get("email", "from_email", fallback=None)
+    if isinstance(configured_sender, str) and configured_sender.strip():
+        return configured_sender
+    return "airflow@airflow"
 
 
 send_smtp_notification = SmtpNotifier

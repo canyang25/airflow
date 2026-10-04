@@ -224,6 +224,37 @@ class TestSmtpNotifier:
             **DEFAULT_EMAIL_PARAMS,
         )
 
+    @pytest.mark.parametrize(
+        ("connection_sender", "configured_sender", "expected"),
+        [
+            pytest.param(None, "config@example.com", "config@example.com", id="config"),
+            pytest.param("  ", "config@example.com", "config@example.com", id="blank-connection"),
+            pytest.param(None, None, "airflow@airflow", id="default"),
+            pytest.param(None, "  ", "airflow@airflow", id="blank-config"),
+        ],
+    )
+    @mock.patch("airflow.providers.smtp.notifications.smtp.SmtpHook")
+    def test_omitted_from_email_uses_connection_then_config(
+        self,
+        mock_smtphook_hook,
+        create_dag_without_db,
+        connection_sender,
+        configured_sender,
+        expected,
+    ):
+        hook = mock_smtphook_hook.return_value.__enter__.return_value
+        hook.from_email = connection_sender
+        hook.subject_template = None
+        hook.html_content_template = None
+        overrides = {}
+        if configured_sender is not None:
+            overrides[("email", "from_email")] = configured_sender
+        with conf_vars(overrides):
+            notifier = SmtpNotifier(to=TEST_RECEIVER, subject=TEST_SUBJECT, html_content=TEST_BODY)
+            notifier({"dag": create_dag_without_db(TEST_DAG_ID)})
+
+        assert hook.send_email_smtp.call_args.kwargs["from_email"] == expected
+
     def test_notifier_default_smtp_conn_id_from_config(self):
         """Test that smtp_conn_id defaults to email.email_conn_id from config."""
         with conf_vars({("email", "email_conn_id"): "config_smtp_conn"}):
