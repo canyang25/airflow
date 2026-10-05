@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest import mock
 
 import pytest
@@ -552,3 +552,94 @@ class TestCloudComposerExternalTaskSensor:
         with pytest.raises(ExternalTaskFailedError):
             task.execute_complete(context={}, event={"status": "failed"})
         assert task.composer_external_task_ids == ["task_a"]
+
+    @pytest.mark.parametrize("composer_airflow_version", [2, 3])
+    @mock.patch("airflow.providers.google.cloud.sensors.cloud_composer.CloudComposerHook")
+    def test_poke_requires_an_in_window_task_in_an_allowed_state(self, mock_hook, composer_airflow_version):
+        date_key = "execution_date" if composer_airflow_version < 3 else "logical_date"
+        window_start = datetime(2024, 5, 22, tzinfo=timezone.utc)
+        window_end = datetime(2024, 5, 23, tzinfo=timezone.utc)
+        cases = [
+            ([("2024-05-21T12:00:00+00:00", "success")], False),
+            ([("2024-05-22T00:00:00+00:00", "success")], False),
+            ([("2024-05-23T00:00:00+00:00", "success")], False),
+            ([("2024-05-22T12:00:00+00:00", "success")], True),
+            ([("2024-05-22T12:00:00+00:00", "running")], False),
+            (
+                [
+                    ("2024-05-21T12:00:00+00:00", "failed"),
+                    ("2024-05-22T12:00:00+00:00", "success"),
+                ],
+                True,
+            ),
+            (
+                [
+                    ("2024-05-21T12:00:00+00:00", "success"),
+                    ("2024-05-22T12:00:00+00:00", "running"),
+                ],
+                False,
+            ),
+        ]
+        actual = []
+        for instances, _expected in cases:
+            task_ids = [f"task_{index}" for index in range(len(instances))]
+            mock_hook.return_value.get_task_instances.return_value = {
+                "task_instances": [
+                    {
+                        "task_id": task_id,
+                        "dag_id": "test_dag_id",
+                        "state": state,
+                        date_key: when,
+                    }
+                    for task_id, (when, state) in zip(task_ids, instances)
+                ],
+                "total_entries": len(instances),
+            }
+            task = CloudComposerExternalTaskSensor(
+                task_id="task-id",
+                project_id=TEST_PROJECT_ID,
+                region=TEST_REGION,
+                environment_id=TEST_ENVIRONMENT_ID,
+                composer_external_dag_id="test_dag_id",
+                composer_external_task_ids=task_ids,
+                allowed_states=["success"],
+                execution_range=[window_start, window_end],
+            )
+            task._composer_airflow_version = composer_airflow_version
+            actual.append(task.poke(context={"logical_date": window_end}))
+
+        assert actual == [expected for _instances, expected in cases]
+
+    @pytest.mark.parametrize("composer_airflow_version", [2, 3])
+    @mock.patch("airflow.providers.google.cloud.sensors.cloud_composer.CloudComposerHook")
+    def test_poke_keeps_waiting_when_only_out_of_window_tasks_failed(
+        self, mock_hook, composer_airflow_version
+    ):
+        date_key = "execution_date" if composer_airflow_version < 3 else "logical_date"
+        mock_hook.return_value.get_task_instances.return_value = {
+            "task_instances": [
+                {
+                    "task_id": "task_0",
+                    "dag_id": "test_dag_id",
+                    "state": "failed",
+                    date_key: "2024-05-21T12:00:00+00:00",
+                }
+            ],
+            "total_entries": 1,
+        }
+        window_start = datetime(2024, 5, 22, tzinfo=timezone.utc)
+        window_end = datetime(2024, 5, 23, tzinfo=timezone.utc)
+        task = CloudComposerExternalTaskSensor(
+            task_id="task-id",
+            project_id=TEST_PROJECT_ID,
+            region=TEST_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            composer_external_dag_id="test_dag_id",
+            composer_external_task_ids=["task_0"],
+            allowed_states=["success"],
+            failed_states=["failed"],
+            execution_range=[window_start, window_end],
+        )
+        task._composer_airflow_version = composer_airflow_version
+
+        assert task.poke(context={"logical_date": window_end}) is False

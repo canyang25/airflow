@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -268,3 +268,63 @@ class TestCloudComposerExternalTaskTrigger:
             },
         )
         assert actual_data == expected_data
+
+    @pytest.mark.parametrize("composer_airflow_version", [2, 3])
+    def test_check_requires_an_in_window_task_in_the_requested_state(self, composer_airflow_version):
+        date_key = "execution_date" if composer_airflow_version < 3 else "logical_date"
+        window_start = datetime(2024, 5, 22, tzinfo=timezone.utc)
+        window_end = datetime(2024, 5, 23, tzinfo=timezone.utc)
+        trigger = CloudComposerExternalTaskTrigger(
+            project_id=TEST_PROJECT_ID,
+            region=TEST_LOCATION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            start_date=window_start,
+            end_date=window_end,
+            allowed_states=["success"],
+            skipped_states=[],
+            failed_states=["failed"],
+            composer_external_dag_id=TEST_COMPOSER_DAG_ID,
+            composer_airflow_version=composer_airflow_version,
+        )
+        cases = [
+            ([("2024-05-21T12:00:00+00:00", "success")], False),
+            ([("2024-05-22T00:00:00+00:00", "success")], False),
+            ([("2024-05-23T00:00:00+00:00", "success")], False),
+            ([("2024-05-22T12:00:00+00:00", "success")], True),
+            ([("2024-05-22T12:00:00+00:00", "running")], False),
+            (
+                [
+                    ("2024-05-21T12:00:00+00:00", "failed"),
+                    ("2024-05-22T12:00:00+00:00", "success"),
+                ],
+                True,
+            ),
+            (
+                [
+                    ("2024-05-21T12:00:00+00:00", "success"),
+                    ("2024-05-22T12:00:00+00:00", "running"),
+                ],
+                False,
+            ),
+        ]
+        actual = []
+        for instances, _expected in cases:
+            task_instances = [
+                {
+                    "task_id": f"task_{index}",
+                    "dag_id": TEST_COMPOSER_DAG_ID,
+                    "state": state,
+                    date_key: when,
+                }
+                for index, (when, state) in enumerate(instances)
+            ]
+            actual.append(
+                trigger._check_task_instances_states(
+                    task_instances,
+                    window_start,
+                    window_end,
+                    ["success"],
+                )
+            )
+
+        assert actual == [expected for _instances, expected in cases]
