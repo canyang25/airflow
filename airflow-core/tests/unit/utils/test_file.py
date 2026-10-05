@@ -92,6 +92,17 @@ class TestOpenMaybeZipped:
             content = test_file.read()
         assert isinstance(content, str)
 
+    def test_uppercase_zip_suffix_is_read_as_archive(self, tmp_path):
+        archive = tmp_path / "reports.ZIP"
+        source = "print('ok')\n"
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("dag.py", source)
+        member = os.path.join(os.fspath(archive), "dag.py")
+
+        assert correct_maybe_zipped(member) == os.fspath(archive)
+        with open_maybe_zipped(member, "r") as handle:
+            assert handle.read() == source
+
 
 class TestDagFileHelpers:
     def test_find_path_from_directory_regex_ignore(self):

@@ -32,7 +32,9 @@ from airflow._shared.module_loading import (
     might_contain_dag_via_default_heuristic as might_contain_dag_via_default_heuristic,
 )
 
-ZIP_REGEX = re.compile(rf"((.*\.zip){re.escape(os.sep)})?(.*)")
+# Discovery compares archive suffixes case-insensitively (path.suffix.lower()).
+# Member paths opened here must accept that same suffix, including .ZIP.
+ZIP_REGEX = re.compile(rf"((.*\.zip){re.escape(os.sep)})?(.*)", re.IGNORECASE)
 
 
 @overload
@@ -44,7 +46,7 @@ def correct_maybe_zipped(fileloc: str | Path) -> str | Path: ...
 
 
 def correct_maybe_zipped(fileloc: None | str | Path) -> None | str | Path:
-    """If the path contains a folder with a .zip suffix, treat it as a zip archive and return path."""
+    """If the path contains a folder whose suffix is ``.zip`` in any letter case, return that archive."""
     if not fileloc:
         return fileloc
     search_ = ZIP_REGEX.search(str(fileloc))
@@ -60,7 +62,7 @@ def open_maybe_zipped(fileloc, mode="r"):
     """
     Open the given file.
 
-    If the path contains a folder with a .zip suffix, then the folder
+    If the path contains a folder whose suffix is ``.zip`` in any letter case, then the folder
     is treated as a zip archive, opening the file inside the archive.
 
     :return: a file object, as in `open`, or as in `ZipFile.open`.
