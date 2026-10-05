@@ -32,10 +32,6 @@ from airflow._shared.module_loading import (
     might_contain_dag_via_default_heuristic as might_contain_dag_via_default_heuristic,
 )
 
-# Discovery compares archive suffixes case-insensitively (path.suffix.lower()).
-# Member paths opened here must accept that same suffix, including .ZIP.
-ZIP_REGEX = re.compile(rf"((.*\.zip){re.escape(os.sep)})?(.*)", re.IGNORECASE)
-
 
 @overload
 def correct_maybe_zipped(fileloc: None) -> None: ...
@@ -46,30 +42,29 @@ def correct_maybe_zipped(fileloc: str | Path) -> str | Path: ...
 
 
 def correct_maybe_zipped(fileloc: None | str | Path) -> None | str | Path:
-    """If the path contains a folder whose suffix is ``.zip`` in any letter case, return that archive."""
+    """If ``fileloc`` names a member of a zip archive, return that archive's path."""
     if not fileloc:
         return fileloc
-    search_ = ZIP_REGEX.search(str(fileloc))
-    if not search_:
+    zipped = _find_zip_archive(fileloc)
+    if zipped is None:
         return fileloc
-    _, archive, _ = search_.groups()
-    if archive and zipfile.is_zipfile(archive):
-        return archive
-    return fileloc
+    archive, _ = zipped
+    return os.fspath(archive)
 
 
 def open_maybe_zipped(fileloc, mode="r"):
     """
     Open the given file.
 
-    If the path contains a folder whose suffix is ``.zip`` in any letter case, then the folder
-    is treated as a zip archive, opening the file inside the archive.
+    When ``fileloc`` is a member of an existing zip archive, open that member.
+    Otherwise open ``fileloc`` directly.
 
     :return: a file object, as in `open`, or as in `ZipFile.open`.
     """
-    _, archive, filename = ZIP_REGEX.search(fileloc).groups()
-    if archive and zipfile.is_zipfile(archive):
-        return TextIOWrapper(zipfile.ZipFile(archive, mode=mode).open(filename))
+    zipped = _find_zip_archive(fileloc)
+    if zipped is not None:
+        archive, member = zipped
+        return TextIOWrapper(zipfile.ZipFile(archive, mode=mode).open(member))
     return open(fileloc, mode=mode)
 
 
@@ -81,6 +76,15 @@ def find_enclosing_file(path: Path) -> Path | None:
     disk (``archive.zip/dag.py``, for instance); this resolves it to the container.
     """
     return next((candidate for candidate in (path, *path.parents) if candidate.is_file()), None)
+
+
+def _find_zip_archive(fileloc: str | Path) -> tuple[Path, str] | None:
+    path = Path(fileloc)
+    archive = find_enclosing_file(path)
+    # ``path`` itself is the file, not a member stored inside it.
+    if archive is None or archive == path or not zipfile.is_zipfile(archive):
+        return None
+    return archive, path.relative_to(archive).as_posix()
 
 
 COMMENT_PATTERN = re.compile(r"\s*#.*")

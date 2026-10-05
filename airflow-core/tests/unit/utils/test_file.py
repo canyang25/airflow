@@ -50,27 +50,20 @@ class TestCorrectMaybeZipped:
 
         assert dag_folder == path
 
-    @mock.patch("zipfile.is_zipfile")
-    def test_correct_maybe_zipped_normal_file_with_zip_in_name(self, mocked_is_zipfile):
-        path = "/path/to/fakearchive.zip.other/file.txt"
-        mocked_is_zipfile.return_value = False
+    @pytest.mark.parametrize(
+        "path",
+        ["/path/to/fakearchive.zip.other/file.txt", "/path/to/fake.ZIP.other/file.txt"],
+    )
+    def test_correct_maybe_zipped_normal_file_with_zip_in_name(self, path):
+        assert correct_maybe_zipped(path) == path
 
-        dag_folder = correct_maybe_zipped(path)
+    def test_correct_maybe_zipped_archive(self, tmp_path):
+        archive = tmp_path / "archive.zip"
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("deep/path/to/file.txt", "data")
+        path = os.path.join(os.fspath(archive), "deep", "path", "to", "file.txt")
 
-        assert dag_folder == path
-
-    @mock.patch("zipfile.is_zipfile")
-    def test_correct_maybe_zipped_archive(self, mocked_is_zipfile):
-        path = "/path/to/archive.zip/deep/path/to/file.txt"
-        mocked_is_zipfile.return_value = True
-
-        dag_folder = correct_maybe_zipped(path)
-
-        assert mocked_is_zipfile.call_count == 1
-        (args, kwargs) = mocked_is_zipfile.call_args_list[0]
-        assert args[0] == "/path/to/archive.zip"
-
-        assert dag_folder == "/path/to/archive.zip"
+        assert correct_maybe_zipped(path) == os.fspath(archive)
 
 
 class TestOpenMaybeZipped:
@@ -80,8 +73,11 @@ class TestOpenMaybeZipped:
             content = test_file.read()
         assert isinstance(content, str)
 
-    def test_open_maybe_zipped_normal_file_with_zip_in_name(self):
-        path = "/path/to/fakearchive.zip.other/file.txt"
+    @pytest.mark.parametrize(
+        "path",
+        ["/path/to/fakearchive.zip.other/file.txt", "/path/to/fake.ZIP.other/file.txt"],
+    )
+    def test_open_maybe_zipped_normal_file_with_zip_in_name(self, path):
         with mock.patch("builtins.open", mock.mock_open(read_data="data")) as mock_file:
             open_maybe_zipped(path)
             mock_file.assert_called_once_with(path, mode="r")
@@ -92,12 +88,24 @@ class TestOpenMaybeZipped:
             content = test_file.read()
         assert isinstance(content, str)
 
-    def test_uppercase_zip_suffix_is_read_as_archive(self, tmp_path):
-        archive = tmp_path / "reports.ZIP"
+    @pytest.mark.parametrize("archive_name", ["reports.ZIP", "reports.Zip"])
+    def test_mixed_case_zip_suffix_is_read_as_archive(self, tmp_path, archive_name):
+        archive = tmp_path / archive_name
         source = "print('ok')\n"
         with zipfile.ZipFile(archive, "w") as zipped:
             zipped.writestr("dag.py", source)
         member = os.path.join(os.fspath(archive), "dag.py")
+
+        assert correct_maybe_zipped(member) == os.fspath(archive)
+        with open_maybe_zipped(member, "r") as handle:
+            assert handle.read() == source
+
+    def test_zip_member_named_like_an_archive_stays_in_the_outer_zip(self, tmp_path):
+        archive = tmp_path / "dags.zip"
+        source = "print('inner')\n"
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("reports.ZIP/dag.py", source)
+        member = os.path.join(os.fspath(archive), "reports.ZIP", "dag.py")
 
         assert correct_maybe_zipped(member) == os.fspath(archive)
         with open_maybe_zipped(member, "r") as handle:
