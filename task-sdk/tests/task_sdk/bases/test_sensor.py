@@ -67,7 +67,7 @@ class DummyAsyncSensor(BaseSensorOperator):
         self.return_value = return_value
 
     def execute_complete(self, context, event=None):
-        raise AirflowException("Should be skipped")
+        raise AirflowException("Sensor failed")
 
 
 class DummySensorWithXcomValue(BaseSensorOperator):
@@ -688,17 +688,12 @@ class TestPokeModeOnly:
 
 
 class TestAsyncSensor:
-    @pytest.mark.parametrize(
-        ("soft_fail", "expected_exception"),
-        [
-            (True, AirflowSkipException),
-            (False, AirflowException),
-        ],
-    )
-    def test_fail_after_resuming_deferred_sensor(self, soft_fail, expected_exception):
+    @pytest.mark.parametrize("soft_fail", [True, False])
+    def test_fail_after_resuming_deferred_sensor(self, soft_fail):
         async_sensor = DummyAsyncSensor(task_id="dummy_async_sensor", soft_fail=soft_fail)
-        with pytest.raises(expected_exception):
+        with pytest.raises(AirflowException, match="Sensor failed") as exc_info:
             async_sensor.resume_execution("execute_complete", None, {})
+        assert type(exc_info.value) is AirflowException
 
     @pytest.mark.parametrize(
         ("soft_fail", "expected_exception"),
@@ -727,24 +722,36 @@ class TestAsyncSensor:
                 context={},
             )
 
-    @pytest.mark.parametrize(
-        ("soft_fail", "expected_exception"),
-        [
-            (True, AirflowSkipException),
-            (False, TaskDeferralError),
-        ],
-    )
-    def test_trigger_failure_after_resuming_deferred_sensor_with_soft_fail(
-        self, soft_fail, expected_exception
-    ):
-        """Test that deferrable sensors with soft_fail skip on trigger failure instead of failing."""
+    @pytest.mark.parametrize("soft_fail", [True, False])
+    def test_trigger_failure_after_resuming_deferred_sensor_with_soft_fail(self, soft_fail):
+        """A trigger failure is not a timeout, so soft_fail must not turn it into a skip."""
         async_sensor = DummyAsyncSensor(task_id="dummy_async_sensor", soft_fail=soft_fail)
-        with pytest.raises(expected_exception):
+        with pytest.raises(TaskDeferralError):
             async_sensor.resume_execution(
                 next_method="__fail__",
                 next_kwargs={"error": TriggerFailureReason.TRIGGER_FAILURE},
                 context={},
             )
+
+    def test_soft_fail_skips_task_timeout_when_resuming(self):
+        """An execution timeout is a timeout, so soft_fail skips it on resume the same way poke does."""
+
+        class RaisingSensor(DummyAsyncSensor):
+            def execute_complete(self, context, event=None):
+                raise AirflowTaskTimeout("timed out")
+
+        sensor = RaisingSensor(task_id="dummy_async_sensor", soft_fail=True)
+        with pytest.raises(AirflowSkipException):
+            sensor.resume_execution("execute_complete", None, {})
+
+    def test_soft_fail_does_not_swallow_reschedule_on_resume(self):
+        class RescheduleSensor(DummyAsyncSensor):
+            def execute_complete(self, context, event=None):
+                raise AirflowRescheduleException(timezone.utcnow())
+
+        sensor = RescheduleSensor(task_id="dummy_async_sensor", soft_fail=True)
+        with pytest.raises(AirflowRescheduleException):
+            sensor.resume_execution("execute_complete", None, {})
 
     def test_trigger_failure_after_resuming_deferred_sensor_with_never_fail(self):
         """Test that deferrable sensors with never_fail skip on trigger failure."""
