@@ -100,16 +100,27 @@ class TestOpenMaybeZipped:
         with open_maybe_zipped(member, "r") as handle:
             assert handle.read() == source
 
-    def test_zip_member_named_like_an_archive_stays_in_the_outer_zip(self, tmp_path):
+    @pytest.mark.parametrize("member_name", ["reports.ZIP/dag.py", "reports.zip/dag.py"])
+    def test_zip_member_named_like_an_archive_stays_in_the_outer_zip(self, tmp_path, member_name):
         archive = tmp_path / "dags.zip"
         source = "print('inner')\n"
         with zipfile.ZipFile(archive, "w") as zipped:
-            zipped.writestr("reports.ZIP/dag.py", source)
-        member = os.path.join(os.fspath(archive), "reports.ZIP", "dag.py")
+            zipped.writestr(member_name, source)
+        member = os.path.join(os.fspath(archive), *member_name.split("/"))
 
         assert correct_maybe_zipped(member) == os.fspath(archive)
         with open_maybe_zipped(member, "r") as handle:
             assert handle.read() == source
+
+    def test_wheel_path_is_not_opened_as_archive(self, tmp_path):
+        wheel = tmp_path / "pkg.whl"
+        with zipfile.ZipFile(wheel, "w") as zipped:
+            zipped.writestr("mod.py", "print('wheel')\n")
+        member = os.path.join(os.fspath(wheel), "mod.py")
+
+        assert correct_maybe_zipped(member) == member
+        with pytest.raises(NotADirectoryError):
+            open_maybe_zipped(member)
 
 
 class TestDagFileHelpers:

@@ -81,8 +81,11 @@ def find_enclosing_file(path: Path) -> Path | None:
 def _find_zip_archive(fileloc: str | Path) -> tuple[Path, str] | None:
     path = Path(fileloc)
     archive = find_enclosing_file(path)
-    # ``path`` itself is the file, not a member stored inside it.
-    if archive is None or archive == path or not zipfile.is_zipfile(archive):
+    # The path itself is the file, not a member stored inside it.
+    # A wheel is a zip file too; only a .zip suffix is an archive here.
+    if archive is None or archive == path or archive.suffix.casefold() != ".zip":
+        return None
+    if not zipfile.is_zipfile(archive):
         return None
     return archive, path.relative_to(archive).as_posix()
 
